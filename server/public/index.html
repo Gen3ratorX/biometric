@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GCTU Classroom Attendance</title>
+<link rel="icon" type="image/png" href="gctu-crest.png" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <img class="crest" src="gctu-crest.png" alt="GCTU crest" />
+      <div class="header-text">
+        <p class="eyebrow">Ghana Communication Technology University</p>
+        <h1>Classroom Attendance System</h1>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="sessions">Sessions</button>
+    <button class="tab-btn" data-tab="students">Students</button>
+    <button class="tab-btn" data-tab="courses">Courses</button>
+    <button class="tab-btn" data-tab="devices">Devices</button>
+  </nav>
+
+  <main>
+    <!-- SESSIONS -->
+    <section id="tab-sessions" class="tab-panel active">
+      <div class="card">
+        <h2>Start a Session</h2>
+        <div class="form-row">
+          <select id="session-course"></select>
+          <select id="session-device"></select>
+          <button id="start-session-btn">Start Session</button>
+        </div>
+      </div>
+
+      <div class="card" id="active-session-card" hidden>
+        <h2>Live Attendance — <span id="active-session-label"></span></h2>
+        <button id="end-session-btn">End Session</button>
+        <a id="export-csv-link" href="#" target="_blank">Export CSV</a>
+        <div class="attendance-grid">
+          <div>
+            <h3>Present (<span id="present-count">0</span>)</h3>
+            <ul id="present-list"></ul>
+          </div>
+          <div>
+            <h3>Absent (<span id="absent-count">0</span>)</h3>
+            <ul id="absent-list"></ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Session History</h2>
+        <table id="session-history-table">
+          <thead>
+            <tr><th>ID</th><th>Course</th><th>Device</th><th>Start</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- STUDENTS -->
+    <section id="tab-students" class="tab-panel">
+      <div class="card">
+        <h2>Add Student</h2>
+        <div class="form-row">
+          <input id="student-name" placeholder="Full name" />
+          <input id="student-index" placeholder="Index number" />
+          <input id="student-programme" placeholder="Programme, e.g. BSc Computer Science" />
+          <input id="student-fingerprint-id" type="number" min="1" placeholder="Fingerprint slot ID" />
+          <button id="add-student-btn">Add</button>
+        </div>
+        <p class="hint">Enroll the student on the sensor first (Serial Monitor's <code>e</code> command) — it will print the assigned <strong>fingerprint slot ID</strong>. Enter that same ID here so the two stay in sync. Leave blank only if testing without hardware.</p>
+      </div>
+
+      <div class="card">
+        <h2>Students</h2>
+        <table id="students-table">
+          <thead><tr><th>ID</th><th>Name</th><th>Index #</th><th>Programme</th><th>Fingerprint Slot</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Enroll Student in Course</h2>
+        <div class="form-row">
+          <select id="enroll-student"></select>
+          <select id="enroll-course"></select>
+          <button id="enroll-btn">Enroll</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- COURSES -->
+    <section id="tab-courses" class="tab-panel">
+      <div class="card">
+        <h2>Add Course</h2>
+        <div class="form-row">
+          <input id="course-name" placeholder="Course name" />
+          <input id="course-code" placeholder="Course code" />
+          <button id="add-course-btn">Add</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Courses</h2>
+        <table id="courses-table">
+          <thead><tr><th>ID</th><th>Name</th><th>Code</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- DEVICES -->
+    <section id="tab-devices" class="tab-panel">
+      <div class="card">
+        <h2>Register a Device</h2>
+        <div class="form-row">
+          <input id="device-label" placeholder="Device label, e.g. Room 204 ESP32" />
+          <button id="add-device-btn">Register</button>
+        </div>
+        <p class="hint">Copy the generated API key into the firmware's <code>API_KEY</code> constant.</p>
+      </div>
+
+      <div class="card">
+        <h2>Devices</h2>
+        <table id="devices-table">
+          <thead><tr><th>ID</th><th>Label</th><th>API Key</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Ghana Communication Technology University &middot; Classroom Attendance System</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,363 @@
+#include <Adafruit_Fingerprint.h>
+#include <HardwareSerial.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <ArduinoJson.h>
+
+// ---- Wifi / backend config ----
+// Fill these in locally before flashing; do not commit real credentials.
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* SERVER_URL = "https://attendance-system-production-eb6e.up.railway.app/api/attendance";
+const char* DEVICE_API_KEY = "YOUR_DEVICE_API_KEY";
+
+const int MIN_CONFIDENCE = 50;          // Minimum fingerSearch() score to accept a match (0-255)
+const unsigned long STEP_TIMEOUT_MS = 10000; // Max time to wait on any single finger-placement step
+
+// AS608 wired to UART2 (RX=16, TX=17) on the ESP32
+HardwareSerial fingerSerial(2);
+Adafruit_Fingerprint finger(&fingerSerial);
+
+// 16x2 I2C LCD. Most modules use address 0x27 or 0x3F — if the screen stays
+// blank/garbled after init, try 0x3F instead. Wired to the ESP32's default
+// I2C pins: SDA=21, SCL=22.
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+void lcdMessage(const String& line1, const String& line2 = "") {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(line1.substring(0, 16));
+  lcd.setCursor(0, 1);
+  lcd.print(line2.substring(0, 16));
+}
+
+void showIdle() {
+  lcdMessage("Scan your", "fingerprint");
+}
+
+// Blocks until the finger is lifted off the sensor, so a finger left resting
+// on it doesn't re-trigger a match/enroll step every loop() cycle. Bounded by
+// a timeout so a stuck/obstructed sensor can't hang the device forever.
+void waitForFingerRelease() {
+  unsigned long start = millis();
+  while (finger.getImage() != FINGERPRINT_NOFINGER) {
+    if (millis() - start > STEP_TIMEOUT_MS) return;
+    delay(50);
+  }
+}
+
+// Waits for a finger to be placed, returning FINGERPRINT_OK once captured or
+// a timeout code if nothing was placed within STEP_TIMEOUT_MS.
+int waitForFingerPlaced() {
+  unsigned long start = millis();
+  int p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (millis() - start > STEP_TIMEOUT_MS) return -1;
+    delay(50);
+  }
+  return FINGERPRINT_OK;
+}
+
+// Finds the first unused template slot by probing loadModel() rather than
+// assuming templates are packed sequentially — templateCount + 1 breaks the
+// moment any template has been deleted out of order, since it can point at
+// an ID that's still occupied and silently overwrite that student's template.
+int getFreeSlotID() {
+  for (int id = 1; id <= 127; id++) {
+    if (finger.loadModel(id) != FINGERPRINT_OK) {
+      return id;
+    }
+  }
+  return -1;
+}
+
+void connectWiFi() {
+  Serial.print("Connecting to WiFi");
+  lcdMessage("Connecting WiFi", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("Connected. IP: ");
+  Serial.println(WiFi.localIP());
+  lcdMessage("WiFi Connected", WiFi.localIP().toString());
+  delay(1500);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  Wire.begin(21, 22);
+  lcd.init();
+  lcd.backlight();
+  lcdMessage("Attendance Sys", "Starting...");
+
+  connectWiFi();
+
+  fingerSerial.begin(57600, SERIAL_8N1, 16, 17);
+
+  if (finger.verifyPassword()) {
+    Serial.println("AS608 sensor found.");
+  } else {
+    Serial.println("AS608 not found — check wiring/baud rate.");
+    lcdMessage("Sensor Error", "Check wiring");
+    while (1) delay(1);
+  }
+
+  finger.getTemplateCount();
+  Serial.print("Templates stored: ");
+  Serial.println(finger.templateCount);
+
+  Serial.println();
+  Serial.println("Commands:");
+  Serial.println("  e  - enroll a new fingerprint");
+  Serial.println("  d  - delete a template by ID");
+  Serial.println("  x  - clear ALL templates on the sensor");
+  Serial.println("  (otherwise the sensor continuously scans for a match)");
+
+  showIdle();
+}
+
+void loop() {
+  if (Serial.available()) {
+    char cmd = Serial.read();
+    if (cmd == 'e') {
+      enrollFingerprint();
+      showIdle();
+    } else if (cmd == 'd') {
+      deleteFingerprint();
+      showIdle();
+    } else if (cmd == 'x') {
+      clearAllFingerprints();
+      showIdle();
+    }
+  }
+
+  matchFingerprint();
+  delay(50);
+}
+
+// Scans for a finger and reports the matched template ID + confidence.
+void matchFingerprint() {
+  int p = finger.getImage();
+  if (p != FINGERPRINT_OK) return;
+
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) {
+    // Bad/partial image — wait for the finger to lift before trying again,
+    // instead of hammering the sensor every 50ms on the same bad placement.
+    waitForFingerRelease();
+    return;
+  }
+
+  p = finger.fingerSearch();
+  if (p == FINGERPRINT_OK && finger.confidence >= MIN_CONFIDENCE) {
+    Serial.print("Match found -> ID #");
+    Serial.print(finger.fingerID);
+    Serial.print(" (confidence ");
+    Serial.print(finger.confidence);
+    Serial.println(")");
+    sendAttendance(finger.fingerID);
+  } else {
+    Serial.println("No match found.");
+    lcdMessage("Not Recognized", "Try again");
+    delay(1500);
+    showIdle();
+  }
+
+  waitForFingerRelease(); // Prevent re-triggering on the same finger press
+}
+
+// Reports the matched fingerprint slot ID to the backend and reflects the
+// result on the LCD.
+void sendAttendance(int fingerprintSlotId) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected — skipping attendance POST.");
+    lcdMessage("Network Error", "No WiFi");
+    delay(2000);
+    showIdle();
+    return;
+  }
+
+  lcdMessage("Checking...", "");
+
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure(); // skips TLS cert validation — fine for a class project, not for production
+
+  HTTPClient http;
+  http.begin(secureClient, SERVER_URL);
+  http.addHeader("Content-Type", "application/json");
+
+  String body = String("{\"api_key\":\"") + DEVICE_API_KEY +
+                "\",\"fingerprint_slot_id\":" + fingerprintSlotId + "}";
+
+  int httpCode = http.POST(body);
+  if (httpCode > 0) {
+    String response = http.getString();
+    Serial.print("Server response (");
+    Serial.print(httpCode);
+    Serial.print("): ");
+    Serial.println(response);
+    showAttendanceResult(response);
+  } else {
+    Serial.print("POST failed: ");
+    Serial.println(http.errorToString(httpCode));
+    lcdMessage("Network Error", "Check server");
+    delay(2000);
+    showIdle();
+  }
+  http.end();
+}
+
+// Parses the backend's JSON response and shows a friendly message on the LCD.
+void showAttendanceResult(const String& response) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, response);
+  if (err) {
+    lcdMessage("Response Error", "");
+    delay(2000);
+    showIdle();
+    return;
+  }
+
+  String status = doc["status"] | "";
+
+  if (status == "success") {
+    String name = doc["student_name"] | "Student";
+    lcdMessage("Welcome!", name);
+  } else if (status == "duplicate") {
+    String name = doc["student_name"] | "Student";
+    lcdMessage("Already Marked", name);
+  } else {
+    String reason = doc["reason"] | "unknown";
+    if (reason == "no_active_session") {
+      lcdMessage("No Active", "Session");
+    } else if (reason == "unknown_fingerprint") {
+      lcdMessage("Not Registered", "See admin");
+    } else if (reason == "not_enrolled") {
+      lcdMessage("Not Enrolled", "In This Course");
+    } else {
+      lcdMessage("Error", reason);
+    }
+  }
+
+  delay(2500);
+  showIdle();
+}
+
+// Enrolls a new fingerprint into the first free template slot ID.
+void enrollFingerprint() {
+  int id = getFreeSlotID();
+  if (id == -1) {
+    Serial.println("Sensor is full (127 templates max).");
+    lcdMessage("Sensor Full", "127 max");
+    delay(2000);
+    return;
+  }
+
+  Serial.print("Enrolling as ID #");
+  Serial.println(id);
+  lcdMessage("Enrolling #" + String(id), "Place finger");
+
+  if (waitForFingerPlaced() != FINGERPRINT_OK) {
+    Serial.println("Enrollment timed out waiting for a finger.");
+    lcdMessage("Enroll Timeout", "");
+    delay(1500);
+    return;
+  }
+
+  int p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Failed to process first image. Try again.");
+    lcdMessage("Try Again", "Image failed");
+    delay(2000);
+    return;
+  }
+
+  Serial.println("Remove finger.");
+  lcdMessage("Remove finger", "");
+  waitForFingerRelease();
+  delay(1500); // brief pause so re-placing the finger is a deliberate second scan, not an instant re-trigger
+
+  Serial.println("Place same finger again...");
+  lcdMessage("Place same", "finger again");
+  if (waitForFingerPlaced() != FINGERPRINT_OK) {
+    Serial.println("Enrollment timed out waiting for a finger.");
+    lcdMessage("Enroll Timeout", "");
+    delay(1500);
+    return;
+  }
+
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Failed to process second image. Try again.");
+    lcdMessage("Try Again", "Image failed");
+    delay(2000);
+    return;
+  }
+
+  p = finger.createModel();
+  if (p != FINGERPRINT_OK) {
+    Serial.println("Fingerprints did not match each other. Enrollment failed.");
+    lcdMessage("Enroll Failed", "Fingers differ");
+    delay(2000);
+    return;
+  }
+
+  p = finger.storeModel(id);
+  if (p == FINGERPRINT_OK) {
+    Serial.print("Enrolled successfully as ID #");
+    Serial.print(id);
+    Serial.println(" — now add this student in the dashboard with this same Fingerprint Slot ID.");
+    lcdMessage("Enrolled! ID #" + String(id), "Add in dashboard");
+    delay(2500);
+  } else {
+    Serial.println("Failed to store template.");
+    lcdMessage("Store Failed", "");
+    delay(2000);
+  }
+
+  waitForFingerRelease();
+}
+
+void deleteFingerprint() {
+  Serial.println("Enter the template ID to delete, then press Enter:");
+  int id = readIntFromSerial();
+  int p = finger.deleteModel(id);
+  if (p == FINGERPRINT_OK) {
+    Serial.print("Deleted ID #");
+    Serial.println(id);
+    lcdMessage("Deleted ID #" + String(id), "");
+    delay(1500);
+  } else {
+    Serial.println("Failed to delete template.");
+    lcdMessage("Delete Failed", "");
+    delay(1500);
+  }
+}
+
+void clearAllFingerprints() {
+  int p = finger.emptyDatabase();
+  if (p == FINGERPRINT_OK) {
+    Serial.println("All templates cleared.");
+    lcdMessage("All Templates", "Cleared");
+  } else {
+    Serial.println("Failed to clear templates.");
+    lcdMessage("Clear Failed", "");
+  }
+  delay(1500);
+}
+
+int readIntFromSerial() {
+  while (!Serial.available()) delay(10);
+  int value = Serial.parseInt();
+  while (Serial.available()) Serial.read(); // clear trailing newline
+  return value;
+}
